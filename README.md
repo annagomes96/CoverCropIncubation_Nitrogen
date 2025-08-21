@@ -29,7 +29,7 @@ Plant Available Nitrogen (nitrate-N & ammonium-N) Data:
 
 ## R Scripts
 The R scripts are located in the `scripts` directory and are structured as follows:
-- `Cover_Crop_2023_Nitrogen.R`: Script for cleaning, processing, and plotting the soil nitrogen data
+- `JEQ_DataAnalysis.Rmd`: Script for cleaning, processing, and plotting the soil nitrogen data
 - `pH_Cover_Crop.R`: Script for cleaning, processing, and plotting the pH data by treatment and sampling date
 
 ##Contact
