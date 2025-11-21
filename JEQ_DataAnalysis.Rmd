@@ -857,7 +857,7 @@ p_kin <- ggplot() +
 p_kin
 
 ggsave(
-  filename = "Figures/kinetic_model_SI4.png",
+  filename = "Figures/kinetic_model_SI1.png",
   plot = p_kin,
   width = 8, height = 6, units = "in", dpi = 300
 )
@@ -884,7 +884,7 @@ scale_color_manual(values = custom_colors, labels = treatment_labels) +
   )
 
 ggsave(last_plot(), 
-       filename = "Figures/dynamics_Ammonium_SI1.png",
+       filename = "Figures/dynamics_Ammonium_SI2.png",
        width=8,
        height=5,
        units= "in",
@@ -975,7 +975,7 @@ all_data_pH%>%
   )
 
 ggsave(last_plot(), 
-       filename = "Figures/pH_SI2.png",
+       filename = "Figures/pH_SI4.png",
        width=6,
        height=10,
        units= "in",
