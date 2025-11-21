@@ -1,0 +1,983 @@
+---
+title: "JEQ Manuscript: Nitrogen Mineralization of Cover Crop Residue Depends on Carbon to Nitrogen Ratio and Soil Temperature, August 2025"
+output: html_notebook
+---
+This is a R Notebook outlining the data processing, analysis, and plotting for our journal article.
+
+Step 1: Load Libraries:
+```{r load libraries}
+library(tidyverse)
+library (ggplot2)
+library (dplyr)
+library(writexl)
+library(multcomp)
+library(multcompView)
+library(broom)
+library(agricolae)
+library(stringr)
+library(forcats)
+library(lme4)
+library(lmerTest) 
+```
+
+Step 2: Load Raw Data
+```{r load raw data}
+PAN_Day1 <- read.csv("Gomes_Run2_711.csv", skip=1)
+PAN_Day15 <- read.csv("Gomes_Run3_727.csv", skip=1)
+PAN_Day29 <- read.csv("Copy_of_Gomes_Run_8.csv", skip=1)
+PAN_Day57 <- read.csv ("Gomes_Run_12_PAN_Gomes_Updated.csv", skip=1)
+PAN_Day85 <- read.csv ("Gomes_Run_15_Oct_3.csv", skip=1)
+PAN_Day112 <- read.csv ("Gomes_Run_22_Oct_31.xlsx - PAN_Soil.csv", skip=1)
+Initial_Nitrogen <- read.csv ("percent_min_updated.csv")
+```
+
+Step 3: Tidy Data
+```{r tidy data}
+# Create treatment information dataframe
+Treatment_info <- tibble(
+  Treatment     = c("CN10", "CN14", "CN19", "CN30"),
+  CN_ratio      = c("10:1", "14:1", "19:1", "30:1"),
+  N_content     = c(4.11, 2.99, 2.28, 1.51),
+  N_app_rate    = c(263.04, 191.36, 145.92, 96.64),  # mg N/kg soil or µg N/g soil
+  N_app_rate_kg = c(322.5, 234.6, 178.9, 118.5)      # kg N/ha equivalent
+)
+
+temperature_labeller <- as_labeller(function(x) gsub("C", "°", x))
+
+# Clean PAN Day 29 column
+PAN_Day29$New.PAN <- NULL
+
+# Combine all PAN datasets
+all_data_PAN <- bind_rows(PAN_Day1, PAN_Day15, PAN_Day29, PAN_Day57, PAN_Day85, PAN_Day112)
+
+# Check for missing values
+sum(is.na(all_data_PAN))
+
+# Separate metadata from 'Sample' column and relabel treatments and temperatures
+all_data_tidy <- all_data_PAN %>%
+  separate(Sample, into = c("tube", "temperature", "Treatment", "replicate", "day"), sep = "_") %>%
+  mutate(
+    day_numeric = as.numeric(str_replace(day, "D", "")),
+    r_numeric   = as.numeric(str_replace(replicate, "R", "")),
+    Treatment = case_when(
+      Treatment == "T1" ~ "Soil Control",
+      Treatment == "T2" ~ "CN10",
+      Treatment == "T3" ~ "CN14",
+      Treatment == "T4" ~ "CN19",
+      Treatment == "T5" ~ "CN30",
+      Treatment == "T6" ~ "CN30+FertN",
+      TRUE              ~ Treatment
+    ),
+    temperature = case_when(
+      temperature == "A10" ~ "10C",
+      temperature == "B15" ~ "15C",
+      temperature == "C20" ~ "20C",
+      TRUE                 ~ temperature
+    )
+  ) 
+
+# Rename nitrogen columns
+all_data_tidy <- all_data_tidy %>%
+  rename(
+    nitrate_N   = final_value,
+    ammonium_N  = final_value.1
+  )
+
+# Summary statistics for PAN, NO3-N, and NH4-N
+PAN_avg <- all_data_tidy %>%
+  group_by(temperature, Treatment, day_numeric) %>%
+  summarise(
+    avg = mean(PAN, na.rm = TRUE),
+    sd  = sd(PAN, na.rm = TRUE),
+    n   = n(),
+    se  = sd / sqrt(n),
+    .groups = "drop"
+  )
+
+# Confidence intervals for PAN
+PAN_avg_df <- PAN_avg %>%
+  mutate(
+    lower_ci = avg - qt(0.975, df = n - 1) * se,
+    upper_ci = avg + qt(0.975, df = n - 1) * se
+  )
+
+# Summary for nitrate-N
+NO3_avg <- all_data_tidy %>%
+  group_by(temperature, Treatment, day_numeric) %>%
+  summarise(
+    avg = mean(nitrate_N, na.rm = TRUE),
+    sd  = sd(nitrate_N, na.rm = TRUE),
+    n   = n(),
+    se  = sd / sqrt(n),
+    .groups = "drop"
+  )
+
+# Summary for ammonium-N
+NH4_avg <- all_data_tidy %>%
+  group_by(temperature, Treatment, day_numeric) %>%
+  summarise(
+    avg = mean(ammonium_N, na.rm = TRUE),
+    sd  = sd(ammonium_N, na.rm = TRUE),
+    n   = n(),
+    se  = sd / sqrt(n),
+    .groups = "drop"
+  )
+
+# Define custom colors and shapes for plotting
+custom_colors <- c(
+  "CN10"         = "#90b76e",
+  "CN14"         = "#ef5f00",
+  "CN19"         = "#3399FF",
+  "CN30"         = "#D4C95F",
+  "CN30+FertN"   = "#707070",
+  "Soil Control" = "#682714"
+)
+
+custom_shapes <- c(
+  "CN10"         = 15, # solid square
+  "CN14"         = 17, # solid triangle up
+  "CN19"         = 18, # solid diamond
+  "CN30"         = 19, # solid circle with border 
+  "CN30+FertN"   = 10, # cross (×)
+  "Soil Control" = 0   # open square
+)
+
+treatment_labels <- c(
+  "CN10" = "C/N10",
+  "CN14" = "C/N14",
+  "CN19" = "C/N19",
+  "CN30" = "C/N30",
+  "CN30+FertN" = "C/N30 + FertN",
+  "Soil Control" = "Soil Control"
+)
+```
+
+Step 4: Calculate %Nmin
+```{r calculate Nmin}
+#average for Soil Only
+Soil_Only <- all_data_tidy %>%
+  filter(Treatment=="Soil Control") %>%
+  group_by(temperature, day_numeric) %>%
+  summarise(avg=mean(PAN), sd=sd(PAN), n=n()) 
+
+Net_Mineralized <- all_data_tidy %>%
+left_join(Soil_Only, by= c("day_numeric", "temperature")) %>%
+  mutate(net_min = PAN - avg)
+
+#filter out 'Soil Control' since now have Net Mineralized
+Net_Mineralized<- Net_Mineralized %>%
+  filter(Treatment!="Soil Control")
+
+#subtract out mineral N added to T6 before calc %N Mineralized 
+Net_Mineralized <- Net_Mineralized %>%
+  mutate(net_min = if_else(Treatment == "CN30+FertN", net_min - 9.2565, net_min))
+
+#now calc Net N min per tube (250grams)
+Net_Mineralized <- Net_Mineralized %>%
+  group_by(temperature, Treatment, day_numeric, r_numeric)%>%
+  mutate(Nmin_per_tube= (net_min * 250))
+
+Avg_Net_Min <- Net_Mineralized %>%
+  group_by(temperature, Treatment, day_numeric) %>%
+  summarise(avg=mean(net_min), sd=sd(net_min), n=n()) %>%
+  mutate(se=sd/sqrt(n))
+
+Avg_Net_Min_T6 <- Avg_Net_Min %>%
+  filter(Treatment != "CN30+FertN")
+
+#calculate percent nitrification (nitrate-N/ total PAN for each sampling date THEN average)
+#now calc percent mineralized (Net_min_tube_g/Start_ON_per tube_g)
+Initial_Nitrogen <- Initial_Nitrogen %>%
+  mutate(Treatment = gsub("CC", "CN", Treatment))
+
+Percent_Mineralized <- Net_Mineralized %>%
+  left_join(Initial_Nitrogen, by = "Treatment") %>%
+  mutate(
+    prop_min = Nmin_per_tube / start_ON_ug_tube,  # fraction of added ON mineralized
+    per_min  = 100 * prop_min
+  )
+
+#now average the percent min between the four replicates
+Percent_Mineralized_avg <- Percent_Mineralized %>%
+  group_by(temperature, Treatment, day_numeric) %>%
+  summarise(avg_per_min=mean(per_min), sd=sd(per_min), n=n()) %>% 
+  mutate(se=sd/sqrt(n))  
+
+#calc 95% CI 
+Percent_Mineralized_CI <- Percent_Mineralized %>% 
+  group_by(temperature, Treatment, day_numeric) %>%
+  summarise(
+    mean_per_min = mean(per_min),
+    se_per_min = sd(per_min) / sqrt(n()),
+    ci_lower = mean_per_min - qt(0.975, df = n() - 1) * se_per_min,
+    ci_upper = mean_per_min + qt(0.975, df = n() - 1) * se_per_min
+  )
+
+```
+
+Step 5: Linear Regressions
+```{r linear regressions}
+# C/N Ratio or percent N vs. % Mineralized (Day 112)
+Day112_df <- Percent_Mineralized_avg %>%
+  filter(day_numeric == 112, Treatment != "CN30+FertN")
+
+#add intial percent N to dataframe
+Day112_df <- Day112_df %>% 
+  left_join(Initial_Nitrogen, by= ("Treatment"))
+
+#pull out C/N ratio and make into numeric collumn
+# Step 1: Extract numeric values from Treatment column
+Day112_df$CN <- as.numeric(gsub("CN", "", Day112_df$Treatment))
+Day112_df$temperature_num <- as.numeric(gsub("C", "", Day112_df$temperature))
+Day112_df$temperature_num <- as.factor(Day112_df$temperature_num)
+custom_colors_CN <- c(`10` = "#90b76e", `14` = "#ef5f00", `19` = "#3399FF", `30` = "#D4C95F")
+
+
+# Calculate linear model coefficients and R-squared values for each temperature group
+models <- Day112_df %>%
+  group_by(temperature_num) %>%
+  do({
+    model <- lm(avg_per_min ~ CN, data = .)
+    data.frame(
+      label = paste("italic(y) == ", format(coef(model)[1], digits = 2), " + ", 
+                    format(coef(model)[2], digits = 2), "*italic(x) ~ ',' ~",
+                    "italic(R)^2 == ", format(summary(model)$r.squared, digits = 2), sep=""),
+      intercept = coef(model)[1],
+      slope = coef(model)[2],
+      r_squared = summary(model)$r.squared,
+      CN = mean(.$CN),  # Adjust the position for the label if necessary
+      avg_per_min = max(.$avg_per_min) + 0.1  # Position above the highest point
+    )
+  })
+
+Day112_df <- Day112_df %>%
+  mutate(temperature_num = as.numeric(as.character(temperature_num)))
+
+# Fit the linear model for each treatment
+models_Treatments <- Day112_df %>%
+  group_by(Treatment) %>%
+  do({
+    model <- lm(avg_per_min ~ temperature_num, data = .)
+    data.frame(
+      Treatment = unique(.$Treatment),
+      Equation = paste("y =", format(coef(model)[1], digits = 2), "+", 
+                       format(coef(model)[2], digits = 2), "x"),
+      R_squared = format(summary(model)$r.squared, digits = 2)
+    )
+  })
+
+# Print out the equations and R-squared values
+print(models_Treatments)
+
+# Calculate the midpoint for each line
+Day112_df <- Day112_df %>%
+  mutate(temperature_num = as.numeric(gsub("C", "", temperature)))
+mid_points <- Day112_df %>%
+  group_by(Treatment) %>%
+  summarize(mid_temp = mean(temperature_num), 
+            mid_avg_per_min = mean(avg_per_min))
+
+```
+
+Step 6a: Fixed-effects linear modelling (ANCOVA)
+```{r linear model}
+# Filter out rows where Treatment is NA (T6)
+Percent_Mineralized_clean <- Percent_Mineralized %>%
+  filter(!is.na(Treatment))
+# Make sure your factors are properly ordered
+Percent_Mineralized_clean$temperature <- factor(Percent_Mineralized_clean$temperature, levels = c("10C", "15C", "20C"))
+Percent_Mineralized_clean$Treatment <- factor(Percent_Mineralized_clean$Treatment, levels = c("CN10", "CN14", "CN19", "CN30"))
+
+#all replicates are independent, no random effect, can't use LMM, need to use LM (I don't have repeated measures)
+model_lm <- lm(per_min ~ temperature * Treatment * day_numeric, data = Percent_Mineralized_clean)
+
+summary(model_lm)
+anova(model_lm)
+
+```
+
+Step 6b:ANCOVA Model Testing
+```{r ANCOVA testing}
+#test model assumptions (linearity, normality of residuals, influential points)
+plot(model_lm, which = 1)  # Residuals vs Fitted
+plot(model_lm, which = 2)  # Normal Q-Q
+plot(model_lm, which = 4)  # Cook’s Distance
+
+model_lm_no274 <- lm(per_min ~ temperature * Treatment * day_numeric,
+                     data = Percent_Mineralized_clean[-c(234, 270, 274), ]) #three tubes as influential points 
+summary(model_lm_no274) 
+
+#confirmed that major conclusions same without influential points, kept in and used original model 
+```
+Step 7a: First-order kinetic modelling of %Nmin
+```{r}
+# Robust first-order fits with multi-start and model selection
+library(dplyr); library(tidyr); library(purrr); library(minpack.lm); library(broom)
+
+# --- deps ---
+suppressPackageStartupMessages({
+  library(dplyr); library(purrr); library(minpack.lm); library(broom)
+})
+
+# --- helper: AICc for nls (safe) ---
+aicc_nls <- function(fit, n_obs) {
+  if (!inherits(fit, "nls")) return(NA_real_)
+  k <- length(coef(fit))
+  AIC(fit) + (2 * k * (k + 1)) / max(n_obs - k - 1, 1)
+}
+
+# --- 2-parameter model: per_min ~ N0 * (1 - exp(-k * day_numeric)) ---
+fit_2p <- function(df) {
+  df <- dplyr::filter(df, is.finite(per_min), is.finite(day_numeric))
+  if (nrow(df) < 3) return(NULL)
+
+  y <- df$per_min; t <- df$day_numeric
+  y_max  <- max(y, na.rm = TRUE)
+  n_days <- max(t, na.rm = TRUE)
+  k_guess <- 0.5 / max(n_days, 1)
+
+  lower <- c(N0 = 0,   k = 0)
+  upper <- c(N0 = 200, k = 5)
+
+  starts <- expand.grid(
+    N0 = pmax(5, c(0.6, 0.9, 1.2, 1.5, 2.0) * pmax(y_max, 5)),
+    k  = c(k_guess/10, k_guess/3, k_guess, 0.01, 0.05, 0.1)
+  )
+
+  try_one <- function(N0, k) try(
+    nlsLM(per_min ~ N0 * (1 - exp(-k * day_numeric)),
+          data = df, start = list(N0 = N0, k = k),
+          lower = lower, upper = upper,
+          control = nls.lm.control(maxiter = 500)),
+    silent = TRUE
+  )
+
+  fits <- purrr::pmap(starts, try_one) |> purrr::keep(~ inherits(.x, "nls"))
+  if (!length(fits)) return(NULL)
+  fits[[ which.min(sapply(fits, AIC)) ]]
+}
+
+# --- 3-parameter model with offset: per_min ~ y0 + N0 * (1 - exp(-k * day_numeric)) ---
+fit_3p <- function(df) {
+  df <- dplyr::filter(df, is.finite(per_min), is.finite(day_numeric))
+  if (nrow(df) < 3) return(NULL)
+
+  y <- df$per_min; t <- df$day_numeric
+  y_max <- max(y, na.rm = TRUE); y_min <- min(y, na.rm = TRUE)
+  n_days <- max(t, na.rm = TRUE)
+  k_guess <- 0.5 / max(n_days, 1)
+
+  lower <- c(y0 = -50, N0 = 0,   k = 0)
+  upper <- c(y0 =  50, N0 = 200, k = 5)
+
+  starts <- expand.grid(
+    y0 = c(0, y_min, y_min/2),
+    N0 = pmax(5, c(0.6, 0.9, 1.2, 1.5, 2.0) * pmax(y_max - max(0, y_min), 5)),
+    k  = c(k_guess/10, k_guess/3, k_guess, 0.01, 0.05, 0.1)
+  )
+
+  try_one <- function(y0, N0, k) try(
+    nlsLM(per_min ~ y0 + N0 * (1 - exp(-k * day_numeric)),
+          data = df, start = list(y0 = y0, N0 = N0, k = k),
+          lower = lower, upper = upper,
+          control = nls.lm.control(maxiter = 500)),
+    silent = TRUE
+  )
+
+  fits <- purrr::pmap(starts, try_one) |> purrr::keep(~ inherits(.x, "nls"))
+  if (!length(fits)) return(NULL)
+  fits[[ which.min(sapply(fits, AIC)) ]]
+}
+
+exists("fit_2p"); exists("fit_3p")
+
+# --- model selection ---
+dat_groups <- Percent_Mineralized_clean %>%
+  filter(Treatment %in% c("CN10","CN14","CN19","CN30")) %>%
+  group_by(Treatment, temperature) %>%
+  tidyr::nest()
+
+
+fits <- dat_groups %>%
+  mutate(
+    fit_2p = purrr::map(data, fit_2p),
+    fit_3p = purrr::map(data, fit_3p),
+    # Use AICc for selection:
+    aic_2p = purrr::map2_dbl(fit_2p, data, ~ if (inherits(.x,"nls")) aicc_nls(.x, nrow(.y)) else Inf),
+    aic_3p = purrr::map2_dbl(fit_3p, data, ~ if (inherits(.x,"nls")) aicc_nls(.x, nrow(.y)) else Inf),
+    model  = dplyr::case_when(
+      is.finite(aic_3p) & (aic_3p + 2 < aic_2p) ~ "3p",
+      is.finite(aic_2p)                         ~ "2p",
+      TRUE                                      ~ "no fit"
+    ),
+    fit    = purrr::pmap(list(model, fit_2p, fit_3p), ~ if(..1=="3p") ..3 else if(..1=="2p") ..2 else NULL)
+  )
+
+# helper extractors that always return length-1 numeric
+coef_or_na <- function(tbl, term) {
+  if (is.null(tbl)) return(NA_real_)
+  v <- tbl$estimate[tbl$term == term]
+  if (length(v)) as.numeric(v[1]) else NA_real_
+}
+se_or_na <- function(tbl, term) {
+  if (is.null(tbl)) return(NA_real_)
+  v <- tbl$std.error[tbl$term == term]
+  if (length(v)) as.numeric(v[1]) else NA_real_
+}
+
+summ_tbl <- fits %>%
+  mutate(
+    n_obs = purrr::map_int(data, nrow),
+    coefs = purrr::map(fit, ~ if (inherits(.x, "nls")) broom::tidy(.x) else NULL),
+    stats = purrr::map2(fit, data, ~ if (inherits(.x, "nls")) {
+      tibble(
+        k_par = length(coef(.x)),
+        AICc  = aicc_nls(.x, nrow(.y)),
+        RMSE  = sqrt(mean((.y$per_min - predict(.x))^2)),
+        R2_p  = cor(.y$per_min, predict(.x))^2
+      )
+    } else {
+      tibble(k_par = NA_integer_, AICc = NA_real_, RMSE = NA_real_, R2_p = NA_real_)
+    }),
+    t_half = purrr::map_dbl(fit, ~ if (inherits(.x,"nls")) log(2)/coef(.x)[["k"]] else NA_real_),
+    day_95 = purrr::map_dbl(fit, ~ if (inherits(.x,"nls")) -log(0.05)/coef(.x)[["k"]] else NA_real_),
+    pred112 = purrr::map2_dbl(fit, data, ~ if (inherits(.x,"nls"))
+      predict(.x, newdata = data.frame(day_numeric = 112))[1] else NA_real_)
+  ) %>%
+  transmute(
+    Treatment, temperature, n_obs, model,
+    y0   = purrr::map_dbl(coefs, ~ if (!is.null(.x) && any(.x$term=="y0")) coef_or_na(.x,"y0") else 0),
+    N0   = purrr::map_dbl(coefs, ~ coef_or_na(.x,"N0")),
+    k    = purrr::map_dbl(coefs, ~ coef_or_na(.x,"k")),
+    se_y0= purrr::map_dbl(coefs, ~ se_or_na(.x,"y0")),
+    se_N0= purrr::map_dbl(coefs, ~ se_or_na(.x,"N0")),
+    se_k = purrr::map_dbl(coefs, ~ se_or_na(.x,"k")),
+    AICc = purrr::map_dbl(stats, ~ .x$AICc),
+    RMSE = purrr::map_dbl(stats, ~ .x$RMSE),
+    R2_p = purrr::map_dbl(stats, ~ .x$R2_p),
+    t_half, day_95, pred112,
+    QC_flag = dplyr::case_when(
+      model == "no fit"   ~ "no fit",
+      is.na(k)            ~ "no fit",
+      k <= 0              ~ "non-pos k",
+      N0 < 0              ~ "neg N0",
+      N0 > 120            ~ ">120% of added N",
+      TRUE                ~ ""
+    )
+  ) %>%
+  arrange(temperature, Treatment) %>%
+  mutate(across(c(N0, k, se_y0, se_N0, se_k, t_half, day_95, pred112, RMSE, R2_p),
+                ~ round(.x, 3)))
+
+# Recast unstable-asymptote groups as "no fit" and blank params
+summ_tbl <- summ_tbl %>%
+  mutate(
+    N0_unreliable = (is.finite(N0) & (N0 >= 200 - 1e-6 | se_N0 > 10 * pmax(N0, 1))),
+    model = if_else(N0_unreliable, "no fit", model),
+    QC_flag = dplyr::case_when(
+      N0_unreliable & QC_flag == "" ~ "N0 not identifiable; recast as no fit",
+      N0_unreliable                 ~ paste(QC_flag, "N0 not identifiable; recast as no fit", sep="; "),
+      TRUE                          ~ QC_flag
+    ),
+    across(c(y0, N0, k, se_y0, se_N0, se_k, AICc, RMSE, R2_p, t_half, day_95, pred112),
+           ~ if_else(model=="no fit", NA_real_, .x))
+  )
+
+summ_tbl #view parameter table 
+
+writexl::write_xlsx(summ_tbl, "SummaryTable_FirstOrder_clean.xlsx") 
+
+```
+
+Step 7b: First-order model parameters for SI table 
+```{r model Nmin}
+library(dplyr)
+library(stringr)
+
+# helper to print "estimate (SE)" or "—" when NA
+fmt_est_se <- function(est, se, digits = 3) {
+  if (is.na(est)) return("—")
+  est_s <- formatC(est, format = "f", digits = digits)
+  se_s  <- ifelse(is.na(se), "—", formatC(se, format = "f", digits = digits))
+  paste0(est_s, " (", se_s, ")")
+}
+
+# Build tidy manuscript table from your 'summ_tbl'
+ms_tbl <- summ_tbl %>%
+  mutate(
+    `y0 (SE)`           = fmt_est_se(y0,  se_y0,  digits = 3),
+    `N0 (%; SE)`        = fmt_est_se(N0,  se_N0,  digits = 3),
+    `k (1/day; SE)`     = fmt_est_se(k,   se_k,   digits = 3),
+    `AICc`              = round(AICc, 3),
+    `RMSE (%N)`         = round(RMSE, 3),
+    `Pseudo-R²`         = round(R2_p, 3),
+    `Half-life t½ (d)`  = round(t_half, 3),
+    `Days to 95% (d)`   = round(day_95, 3),
+    `Predicted %N at day 112` = round(pred112, 3),
+    `Selected model`    = dplyr::recode(model,
+                            `2p` = "2-parameter (no offset)",
+                            `3p` = "3-parameter (with offset)",
+                            `no fit` = "No fit")
+  ) %>%
+  transmute(
+    Treatment           = Treatment,
+    Temperature         = temperature,
+    `Observations (n)`  = n_obs,
+    `Selected model`,
+    `y0 (SE)`,
+    `N0 (%; SE)`,
+    `k (1/day; SE)`,
+    AICc,
+    `RMSE (%N)`,
+    `Pseudo-R²`,
+    `Half-life t½ (d)`,
+    `Days to 95% (d)`,
+    `Predicted %N at day 112`,
+    `QC flag`           = QC_flag
+  )
+
+ms_tbl
+
+# Also write to Excel for manuscript:
+writexl::write_xlsx(ms_tbl, "Kinetics_summary_manuscript.xlsx")
+
+# Make a slimmed table with the requested columns (and order)
+clean_ms_tbl <- ms_tbl %>%
+  dplyr::select(
+    Temperature,
+    Treatment,
+    `Selected model`,
+    `y0 (SE)`,
+    `N0 (%; SE)`,
+    `k (1/day; SE)`,
+    AICc,
+    `RMSE (%N)`,
+    `Pseudo-R²`,
+    `Predicted %N at day 112`
+  ) %>%
+  dplyr::arrange(Temperature, Treatment)
+
+clean_ms_tbl
+
+
+# Write to Excel
+writexl::write_xlsx(clean_ms_tbl, "Kinetics_summary_clean.xlsx")
+
+```
+
+Manuscript Figures:
+
+Figure 3. Nitrate-N over time by temperature and treatment
+```{r figure 3}
+NO3_avg %>%
+  ggplot(aes(x=day_numeric, y=avg, group=Treatment, color=Treatment, shape=Treatment)) +
+  geom_point(size=3) +
+  geom_line(linetype= "dashed", linewidth=1) +
+  facet_wrap(~temperature, labeller = temperature_labeller) + 
+  #scale_x_continuous(breaks = NO3_avg$day_numeric) +  # Set x-axis breaks at the days of data
+  geom_errorbar(aes(ymin=avg-se, ymax=avg+se),    width=35,position=position_dodge(0.05))+
+  labs(x="Incubation Duration (d)", y=expression(NO[3]*"-Nitrogen"~(mu*g/g)))+
+scale_color_manual(values = custom_colors, labels = treatment_labels) +
+  scale_shape_manual(values = custom_shapes, labels = treatment_labels) +
+  theme_bw() +  # Apply base theme first
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),  # Customize facet label size and style
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave(last_plot(), 
+       filename = "Figures/dynamics_Nitrate_N_fig3.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+
+```
+
+Figure 4. Net PAN over time (excludes C/N30 + FertN)
+```{r figure 4}
+#plot Net N Mineralized without T6, Fig 4
+Avg_Net_Min_T6 %>%
+  ggplot(aes(x=day_numeric, y=avg, group= Treatment, color=Treatment, shape=Treatment))+
+  geom_point(size=3)+
+  geom_line(linetype= "dashed", size=1) +
+  facet_wrap(~temperature, labeller = temperature_labeller) + 
+  geom_errorbar(aes(ymin=avg-se, ymax= avg+se), width=30,
+                position=position_dodge(0.05))+
+  labs(x="Incubation Duration (d)", y = expression(NO[3] * "-Nitrogen & " * NH[4] * "-Nitrogen" ~ (mu * g/g))) +
+  #ggtitle("Net Nitrogen Mineralization of Cover Crop Residue")+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "darkred", linewidth=1) +
+ scale_color_manual(values = custom_colors, labels = treatment_labels) +
+  scale_shape_manual(values = custom_shapes, labels = treatment_labels) +
+  #scale_x_continuous(breaks = Avg_Net_Min_T6$day_numeric) +  # Set x-axis breaks at the days of data
+  theme_bw() +  # Apply base theme first
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),  # Customize facet label size and style
+    # Add any other theme customizations here
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave(last_plot(), 
+       filename = "Figures/Net_Nitrogen_fig4.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+```
+
+Figure 5. %N mineralized over time by treatment (with CIs, excludes CN30+FertN)
+```{r figure 5}
+#figure 5
+Percent_Mineralized_CI %>%
+  filter(!Treatment == "CN30+FertN") %>% 
+  ggplot(aes(x = day_numeric, y = mean_per_min, group = Treatment, color = Treatment, shape=Treatment)) +
+  geom_point(size=3) +
+  geom_line(linetype="dashed", size=1) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = Treatment), alpha = 0.1, color = NA, show.legend = FALSE) +
+  facet_wrap(~temperature, labeller = temperature_labeller) +
+  labs(x = "Incubation Period (d)", y = expression("Mineralized N" ~ "[" ~ NO[4] + NO[3] ~ "]" ~ "(%)")) +
+  #ggtitle("Mineralization (%) of Cover Crop Residue Nitrogen") +
+  scale_color_manual(values = custom_colors, labels = treatment_labels) +
+  scale_shape_manual(values = custom_shapes, labels = treatment_labels) +
+  scale_fill_manual(values = custom_colors) +  # Ensure fill colors match line colors
+  #scale_x_continuous(breaks = unique(Percent_Mineralized_CI$day_numeric)) +  # Set x-axis breaks at the days of data
+  geom_hline(yintercept = 0, linetype = "dashed", color = "darkred", linewidth = 1) +
+  theme_bw() +  # Apply base theme first
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),  # Customize facet label size and style
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+ggsave(last_plot(), 
+       filename = "Figures/N_min_fig5.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+
+```
+
+Figure 6. %N Mineralized vs. C/N ratio (Day 112), with regression lines by temperature
+```{r figure 6}
+ggplot(Day112_df, aes(x = CN, y = avg_per_min)) +
+  geom_point(aes(shape = factor(temperature_num)), color = "black") +  # Shapes by temp
+  geom_smooth(aes(linetype = factor(temperature_num)), method = "lm", se = FALSE, formula = y ~ x, color = "black") +
+  labs(
+    x = "C/N Ratio",
+    y = expression("Mineralized N" ~ "[" ~ NO[4] + NO[3] ~ "]" ~ "(%)"),
+    shape = "Temperature (°C)",  # Legend title for shapes
+    linetype = "Temperature (°C)"  # Legend title for linetypes
+  ) +
+  scale_shape_manual(
+    values = c("10" = 16, "15" = 17, "20" = 15)  # Example: circle, triangle, filled circle
+  ) +
+  geom_point(
+    aes(shape = factor(temperature_num)),
+    color = "black",
+    size = 3  # increase this value to make points bigger
+  ) +
+  scale_linetype_manual(
+    values = c("10" = "solid", "15" = "dashed", "20" = "dotted")
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = c(0.95, 0.95),
+    legend.justification = c("right", "top"),
+    legend.background = element_rect(fill = alpha('white', 0.5)),
+    legend.key.width = unit(1.5, "cm")
+  )
+
+
+
+print(models)
+
+ggsave(last_plot(), 
+       filename = "Figures/Linear_Fig6.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+```
+
+Figure 7. %N Mineralized vs. Temperature (Day 112), with labels on lines
+```{r figure 7}
+# Add a relabeled column to mid_points before plotting
+mid_points <- mid_points %>%
+  dplyr::mutate(Treatment_label = treatment_labels[Treatment])
+
+ggplot(Day112_df, aes(x = temperature_num, y = avg_per_min, group = Treatment, shape = Treatment)) +
+  geom_point(aes(color = Treatment), size = 3) +  # Points with custom colors
+  geom_smooth(aes(color = Treatment), method = "lm", se = FALSE, formula = y ~ x) +  # Lines with custom colors
+  scale_color_manual(values = custom_colors) +  # Apply custom colors
+  scale_shape_manual(values = custom_shapes) +  # Apply custom shapes
+  
+  # Add labels at the midpoint of the lines
+  geom_text(data = mid_points, 
+              aes(x = mid_temp, y = mid_avg_per_min, label = Treatment_label, color = Treatment), size = 4, fontface = "bold", vjust = -1) +  # Adjust the position with vjust
+  labs(x = "Temperature (°C)", 
+       y = expression("Mineralized N" ~ "[" ~ NO[4] + NO[3] ~ "]" ~ "(%)"), 
+       color = "Treatment", 
+       linetype = "Treatment") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",  # Remove legend as labels are on the lines
+    legend.title = element_text(face = "bold"),
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave(last_plot(), 
+       filename = "Figures/Linear_temp_fig7.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+
+```
+
+Figure 8. %N Mineralized comparison of CN30 vs. CN30+FertN
+```{r figure 8}
+Percent_Mineralized_avg %>%
+  filter (Treatment == "CN30" | Treatment == "CN30+FertN") %>% 
+  ggplot(aes(x=day_numeric, y=avg_per_min, group= Treatment, color=Treatment, shape=Treatment)) +
+  geom_point(size=3) +
+  geom_line(linetype= "dashed", linewidth=1) +
+  facet_wrap(~temperature, labeller = temperature_labeller) +
+  #scale_x_continuous(breaks = unique(Percent_Mineralized_avg$day_numeric)) +  # Set x-axis breaks at the days of data
+  geom_errorbar(aes(ymin = avg_per_min - se, ymax = avg_per_min + se), 
+                width = 16, 
+                position = position_dodge(0.05)) +
+  labs(x = "Incubation Period (d)", y = expression("Mineralized N" ~ "[" ~ NO[4] + NO[3] ~ "]" ~ "(%)"))+
+  #ggtitle("Percent Nitrogen Mineralized, CN30 with Doubled Residual Soil N")+
+  scale_color_manual(values = custom_colors, labels = treatment_labels) +
+  scale_shape_manual(values = custom_shapes, labels = treatment_labels) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "darkred", linewidth=1) +
+  theme_bw() +  # Apply base theme first
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),  # Customize facet label size and style
+    # Add any other theme customizations here
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_blank()  # Remove major grid lines
+    #panel.grid.minor = element_blank()   # Remove minor grid lines
+  )
+
+ggsave(last_plot(), 
+       filename = "Figures/N_minT6_fig8.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+```
+
+SI, Figure 1: Modelling Kinetics of %Nmin 
+```{r SI figure 1}
+#Build inputs for the kinetics overlay plot 
+library(tidyr)
+library(purrr)
+library(stringr)
+library(ggplot2)
+
+# 0) Residue treatments to plot
+res_trts <- c("CN10","CN14","CN19","CN30")
+
+# rebuild raw points
+raw_df <- Percent_Mineralized_clean %>%
+  dplyr::filter(Treatment %in% c("CN10","CN14","CN19","CN30")) %>%
+  dplyr::mutate(Treatment = stringr::str_trim(as.character(Treatment)))
+
+# keep only groups that actually have a fit
+keep_lines <- summ_tbl %>%
+  dplyr::filter(model != "no fit") %>%
+  dplyr::transmute(Treatment, temperature)
+
+# predicted lines
+pred_lines <- fits %>%
+  dplyr::semi_join(keep_lines, by = c("Treatment","temperature")) %>%
+  dplyr::transmute(Treatment, temperature, fit, data) %>%
+  dplyr::mutate(
+    grid = purrr::map(data, ~ tibble::tibble(
+      day_numeric = seq(min(.x$day_numeric, na.rm = TRUE),
+                        max(.x$day_numeric, na.rm = TRUE),
+                        length.out = 200)
+    )),
+    pred = purrr::map2(fit, grid, ~ if (inherits(.x, "nls")) {
+      tibble::tibble(
+        day_numeric = .y$day_numeric,
+        fitted = as.numeric(stats::predict(.x, newdata = .y))
+      )
+    } else NULL)
+  ) %>%
+  dplyr::select(Treatment, temperature, pred) %>%
+  tidyr::unnest(cols = pred)
+
+# treatments present in either raw points or lines
+present_trts <- sort(unique(c(
+  as.character(raw_df$Treatment),
+  if (exists("pred_lines") && nrow(pred_lines) > 0) as.character(pred_lines$Treatment) else character(0)
+)))
+
+# use only those colors/labels (names in your objects must be "CN10","CN14","CN19","CN30", ...)
+pal_use <- custom_colors[present_trts]
+lab_use <- treatment_labels[present_trts]
+
+p_kin <- ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", show.legend = FALSE) +
+  geom_point(data = raw_df,
+             aes(day_numeric, per_min, color = Treatment),
+             alpha = 0.5) +
+  geom_line(data = pred_lines,
+            aes(day_numeric, fitted, color = Treatment),
+            linewidth = 1.5) +
+  facet_wrap(~ temperature, nrow = 1, labeller = temperature_labeller) +
+  scale_color_manual(values = pal_use,
+                     breaks = present_trts,
+                     labels = lab_use,
+                     drop = FALSE,
+                     name = "Treatment (C/N)") +
+  labs(x = "Incubation Duration (d)", y = "%N mineralized") +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text  = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+p_kin
+
+ggsave(
+  filename = "Figures/kinetic_model_SI4.png",
+  plot = p_kin,
+  width = 8, height = 6, units = "in", dpi = 300
+)
+```
+
+SI, Figure 2. Ammonium-N only 
+```{r SI figure 2}
+
+NH4_avg %>%
+  ggplot(aes(x=day_numeric, y=avg, group=Treatment, color=Treatment, shape=Treatment)) +
+  geom_point(size=3) +
+  geom_line(linetype= "dashed", linewidth=1) +
+  facet_wrap(~temperature, labeller = temperature_labeller) + 
+  #scale_x_continuous(breaks = NH4_avg$day_numeric) +  # Set x-axis breaks at the days of data
+  geom_errorbar(aes(ymin=avg-se, ymax=avg+se), width=.2, position=position_dodge(0.05)) +
+  labs(x="Incubation Duration (d)", y=expression(NH[4]*"-Nitrogen"~(mu*g/g)))+
+scale_color_manual(values = custom_colors, labels = treatment_labels) +
+  scale_shape_manual(values = custom_shapes, labels = treatment_labels) +
+  theme_bw() +  # Apply base theme first
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),  # Customize facet label size and style
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave(last_plot(), 
+       filename = "Figures/dynamics_Ammonium_SI1.png",
+       width=8,
+       height=5,
+       units= "in",
+       dpi=300)
+```
+
+
+SI, Figure 3: Soil Only for each temperature (differences in SOM N mineralization)
+```{r SI figure 3}
+PAN_avg %>%
+  filter(Treatment == "Soil Control") %>%
+  ggplot(aes(x = day_numeric, y = avg, group = temperature)) +
+  geom_line(aes(linetype = temperature), color = "black") +
+  scale_linetype_manual(values = c("10C" = "solid", "15C" = "dashed", "20C" = "dotted")) +
+  geom_errorbar(aes(ymin = avg - se, ymax = avg + se), width = .2, position = position_dodge(0.05)) +
+  labs(x = "Incubation Duration (d)", y = expression(NO[3] * "-Nitrogen & " * NH[4] * "-Nitrogen" ~ (mu * g/g))) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "none"  # Remove the legend
+  ) +
+  geom_text(
+    data = . %>% filter(day_numeric == max(day_numeric)),  # Place labels at the end of the lines
+    aes(label = paste0(temperature, "°C")),
+    hjust = -0.1, vjust = 0.5  # Adjust these values to fine-tune label positions
+  )
+
+
+ggsave(last_plot(), 
+       filename = "Figures/Dynamics_soilonly_SI3.png",
+       width=8,
+       height=6,
+       units= "in",
+       dpi=300)
+```
+
+
+SI, Figure 4: Changes in pH (Data Analysis and Plotting)
+```{r SI figure 4}
+pH_all_days <- read.csv("Summer_pH_Final2.csv")
+
+sum(is.na(pH_all_days))
+
+all_data_pH <- pH_all_days%>% 
+  separate(col=sample.name, into= c('temperature',  'day', 'Treatment'), sep='_')
+
+all_data_pH$day_numeric<- str_replace(all_data_pH$day, "D", " ")
+all_data_pH$day_numeric <- as.numeric(all_data_pH$day_numeric)
+
+all_data_pH <- all_data_pH %>% 
+  mutate(Treatment = case_when(
+    Treatment == "T1" ~ "Soil Control (No CC)",
+    Treatment == "T2" ~ "CN10",
+    Treatment == "T3" ~ "CN14",
+    Treatment == "T4" ~ "CN19",
+    Treatment == "T5" ~ "CN30",
+    Treatment == "T6"~ "CN30+FertN",
+    TRUE ~ Treatment
+  ))    
+
+all_data_pH <- all_data_pH %>% 
+  mutate(temperature = case_when(
+    temperature == "A10" ~ "10C",
+    temperature == "B15" ~ "15C",
+    temperature == "C20" ~ "20C",
+    TRUE ~ temperature
+  ))
+
+all_data_pH$day <- NULL
+
+all_data_pH%>%
+  ggplot(aes(x=day_numeric, y=pH, group=Treatment,color=Treatment, shape=Treatment))+
+  geom_point(size = 3) +  # Increase the size of the points
+  geom_line(linetype= "solid", linewidth=0.75) +
+  facet_wrap(~temperature, ncol=1, labeller = temperature_labeller)+
+  labs(x="Incubation Duration (d)", y= "pH")+
+  #scale_x_continuous(breaks = all_data_pH$day_numeric) + 
+  scale_color_manual(values = custom_colors, labels = treatment_labels) +
+  scale_shape_manual(values = custom_shapes, labels = treatment_labels) +
+  theme_bw() +  # Apply base theme first
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),  # Customize facet label size and style
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave(last_plot(), 
+       filename = "Figures/pH_SI2.png",
+       width=6,
+       height=10,
+       units= "in",
+       dpi=300)
+```
